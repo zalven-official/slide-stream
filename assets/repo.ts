@@ -1,32 +1,67 @@
-import { initDB, Screenshot, Presentation } from "./db";
+import { openDB, IDBPDatabase } from "idb";
 
+// --- Database Configuration ---
+export interface Screenshot {
+  id?: number;
+  pptId: string;
+  blob: Blob;
+  timestamp: number;
+  order: number;
+}
+
+export interface Presentation {
+  id: string;
+  name: string;
+  createdAt: number;
+}
+
+export async function initDB() {
+  return openDB("SnapStackDB", 1, {
+    upgrade(db) {
+      if (!db.objectStoreNames.contains("presentations")) {
+        db.createObjectStore("presentations", { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains("screenshots")) {
+        const store = db.createObjectStore("screenshots", {
+          keyPath: "id",
+          autoIncrement: true,
+        });
+        store.createIndex("by-ppt", "pptId");
+      }
+    },
+  });
+}
+
+// --- Repository Pattern ---
 export class PPTRepository {
   private static async getDB() {
     return await initDB();
   }
-  static async createPresentation(name: string): Promise<string> {
+
+  static async createPresentation(name: string): Promise<Presentation> {
     const db = await this.getDB();
-    const id = crypto.randomUUID();
-    await db.put("presentations", { id, name, createdAt: Date.now() });
-    return id;
+    const ppt = { id: crypto.randomUUID(), name, createdAt: Date.now() };
+    await db.put("presentations", ppt);
+    return ppt;
   }
+
   static async getAllPresentations(): Promise<Presentation[]> {
     const db = await this.getDB();
     return db.getAll("presentations");
   }
+
   static async addScreenshot(pptId: string, blob: Blob): Promise<number> {
     const db = await this.getDB();
     const count = await db.countFromIndex("screenshots", "by-ppt", pptId);
-
-    const newScreenshot: Screenshot = {
+    const id = await db.add("screenshots", {
       pptId,
       blob,
       timestamp: Date.now(),
       order: count,
-    };
-    const result = await db.add("screenshots", newScreenshot);
-    return result as number;
+    });
+    return id as number;
   }
+
   static async getScreenshotsByPPT(pptId: string): Promise<Screenshot[]> {
     const db = await this.getDB();
     return db.getAllFromIndex("screenshots", "by-ppt", pptId);
@@ -35,21 +70,5 @@ export class PPTRepository {
   static async deleteScreenshot(id: number): Promise<void> {
     const db = await this.getDB();
     await db.delete("screenshots", id);
-  }
-
-  static async deletePresentation(pptId: string): Promise<void> {
-    const db = await this.getDB();
-    // 1. Delete all screenshots linked to this PPT
-    const tx = db.transaction(["screenshots", "presentations"], "readwrite");
-    const index = tx.objectStore("screenshots").index("by-ppt");
-    const keys = await index.getAllKeys(pptId);
-
-    for (const key of keys) {
-      await tx.objectStore("screenshots").delete(key);
-    }
-
-    // 2. Delete the presentation entry
-    await tx.objectStore("presentations").delete(pptId);
-    await tx.done;
   }
 }

@@ -1,8 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
 import {
   Camera,
   FileUp,
@@ -19,13 +20,13 @@ function App() {
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
   const [mode, setMode] = useState<"idle" | "adjusting">("idle");
 
+  // 1. Initial Load: Get or Create Project
   useEffect(() => {
     const init = async () => {
       const ppts = await PPTRepository.getAllPresentations();
       let current = ppts[0];
       if (!current) {
-        const id = await PPTRepository.createPresentation("My Video Deck");
-        current = { id, name: "My Video Deck", createdAt: Date.now() };
+        current = await PPTRepository.createPresentation("My Project");
       }
       setActivePpt(current);
       loadScreenshots(current.id);
@@ -35,10 +36,11 @@ function App() {
 
   const loadScreenshots = async (id: string) => {
     const data = await PPTRepository.getScreenshotsByPPT(id);
-    setScreenshots(data.sort((a, b) => b.timestamp - a.timestamp)); // Newest first
+    setScreenshots(data.sort((a, b) => b.timestamp - a.timestamp));
   };
 
-  const toggleViewfinder = async () => {
+  // 2. Capture Engine
+  const triggerCapture = useCallback(async () => {
     const [tab] = await browser.tabs.query({
       active: true,
       currentWindow: true,
@@ -55,48 +57,41 @@ function App() {
     } else {
       await captureAndSave(tab.id);
     }
-  };
+  }, [mode, activePpt]);
+
   const captureAndSave = async (tabId: number) => {
     try {
-      // 1. Get location from box
+      // A. Get the box position
       const rect = await browser.tabs.sendMessage(tabId, { type: "GET_RECT" });
-      if (!rect) {
-        console.error("Could not find viewfinder rect");
-        return;
-      }
+      if (!rect) throw new Error("Viewfinder not found");
 
-      // 2. Save location for next time
-      await browser.storage.local.set({
-        viewfinderDim: {
-          width: rect.width,
-          height: rect.height,
-          top: rect.top,
-          left: rect.left,
+      // B. Save position for next time
+      await browser.storage.local.set({ viewfinderDim: rect });
+
+      // C. STEALTH MODE: Hide the blue box so it isn't in the screenshot
+      await browser.tabs.sendMessage(tabId, { type: "HIDE_VIEWFINDER" });
+
+      // D. Wait for browser repaint (essential to avoid capturing the blue box)
+      await new Promise((r) => setTimeout(r, 100));
+
+      // E. Take the clean screenshot
+      const dataUrl = await browser.tabs.captureVisibleTab(
+        browser.windows.WINDOW_ID_CURRENT,
+        {
+          format: "png",
         },
-      });
+      );
+      if (!dataUrl) throw new Error("Capture failed");
 
-      // 3. Take screenshot of the CURRENT window
-      // Explicitly passing null or the current window ID helps WXT/Chrome
-      const dataUrl = await browser.tabs.captureVisibleTab(undefined, {
-        format: "png",
-      });
-
-      if (!dataUrl) {
-        console.error("Failed to capture tab");
-        return;
-      }
-
-      // 4. Crop using Canvas
+      // F. Crop the image
       const croppedBlob = await cropImage(dataUrl, rect);
 
-      // 5. Save to DB
+      // G. Save to Database
       if (activePpt && croppedBlob) {
         await PPTRepository.addScreenshot(activePpt.id, croppedBlob);
         await loadScreenshots(activePpt.id);
       }
 
-      // 6. Cleanup
-      await browser.tabs.sendMessage(tabId, { type: "HIDE_VIEWFINDER" });
       setMode("idle");
     } catch (err) {
       console.error("Capture failed:", err);
@@ -107,38 +102,33 @@ function App() {
   const cropImage = (src: string, rect: any): Promise<Blob> => {
     return new Promise((res, rej) => {
       const img = new Image();
-      img.crossOrigin = "anonymous"; // Prevent tainted canvas
+      // Allow capturing images from other domains
+      img.crossOrigin = "anonymous";
+
       img.onload = () => {
         const canvas = document.createElement("canvas");
-
-        // Calculate the scale between the actual image and the viewport
-        // This is crucial because a 1920x1080 screen capture is larger than the browser window
         const dpr = window.devicePixelRatio || 1;
 
-        canvas.width = rect.width * dpr;
-        canvas.height = rect.height * dpr;
+        // Ensure we handle High DPI (Retina) screens correctly
+        const sX = Math.max(0, rect.left * dpr);
+        const sY = Math.max(0, rect.top * dpr);
+        const sW = rect.width * dpr;
+        const sH = rect.height * dpr;
+
+        canvas.width = sW;
+        canvas.height = sH;
 
         const ctx = canvas.getContext("2d");
-        if (!ctx) return rej("Failed to get canvas context");
+        if (!ctx) return rej("Canvas context failed");
 
-        ctx.drawImage(
-          img,
-          rect.left * dpr, // Source X
-          rect.top * dpr, // Source Y
-          rect.width * dpr, // Source Width
-          rect.height * dpr, // Source Height
-          0, // Dest X
-          0, // Dest Y
-          rect.width * dpr, // Dest Width
-          rect.height * dpr, // Dest Height
-        );
+        ctx.drawImage(img, sX, sY, sW, sH, 0, 0, sW, sH);
 
         canvas.toBlob((b) => {
           if (b) res(b);
           else rej("Blob generation failed");
         }, "image/png");
       };
-      img.onerror = () => rej("Failed to load image");
+      img.onerror = () => rej("Image load error");
       img.src = src;
     });
   };
@@ -148,34 +138,65 @@ function App() {
       active: true,
       currentWindow: true,
     });
-    if (tab?.id)
+    if (tab?.id) {
       await browser.tabs.sendMessage(tab.id, { type: "HIDE_VIEWFINDER" });
+    }
     setMode("idle");
   };
 
+  // 3. Shortcuts: S to toggle/confirm, Escape to cancel
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      // Don't trigger if user is typing in an input
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+
+      if (e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        triggerCapture();
+      }
+      if (e.key === "Escape" && mode === "adjusting") {
+        cancelCapture();
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [triggerCapture, mode]);
+
   return (
-    <div className="flex flex-col h-screen bg-background text-foreground p-4 gap-4">
-      <header className="flex items-center justify-between">
+    <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden">
+      {/* Header */}
+      <header className="p-4 border-b flex items-center justify-between bg-card/50 backdrop-blur-sm">
         <div className="flex items-center gap-2">
-          <div className="bg-primary p-1.5 rounded-lg">
+          <div className="bg-primary p-1.5 rounded-lg shadow-lg">
             <LayoutDashboard className="w-4 h-4 text-primary-foreground" />
           </div>
-          <h1 className="font-bold text-lg leading-none">SnapStack</h1>
+          <h1 className="font-bold text-sm tracking-tight">SnapStack</h1>
         </div>
+        <Badge variant="secondary" className="text-[10px] font-mono px-2 py-0">
+          {activePpt?.name}
+        </Badge>
       </header>
 
-      <div className="flex flex-col gap-2">
+      {/* Main Controls */}
+      <div className="p-4 flex flex-col gap-4 flex-1 overflow-hidden">
         <Button
-          onClick={toggleViewfinder}
-          className="w-full h-12 text-md font-semibold gap-2 shadow-lg"
+          onClick={triggerCapture}
+          className="w-full h-16 flex-col items-center justify-center gap-1 shadow-md hover:shadow-lg transition-all active:scale-[0.98]"
           variant={mode === "adjusting" ? "default" : "secondary"}
         >
-          {mode === "adjusting" ? (
-            <Check className="w-5 h-5" />
-          ) : (
-            <Camera className="w-5 h-5" />
-          )}
-          {mode === "adjusting" ? "Confirm Snap" : "Capture YouTube Slide"}
+          <div className="flex items-center gap-2 font-bold">
+            {mode === "adjusting" ? (
+              <Check className="w-5 h-5 animate-in zoom-in" />
+            ) : (
+              <Camera className="w-5 h-5" />
+            )}
+            {mode === "adjusting" ? "Confirm Selection" : "Open Viewfinder"}
+          </div>
+          <span className="text-[10px] font-normal opacity-60">
+            Press <kbd className="border bg-muted px-1 rounded mx-1">S</kbd> to{" "}
+            {mode === "adjusting" ? "capture" : "start"}
+          </span>
         </Button>
 
         {mode === "adjusting" && (
@@ -183,41 +204,50 @@ function App() {
             variant="ghost"
             size="sm"
             onClick={cancelCapture}
-            className="text-muted-foreground"
+            className="h-6 text-xs text-muted-foreground hover:text-destructive transition-colors"
           >
-            <X className="w-4 h-4 mr-1" /> Cancel
+            <X className="w-3 h-3 mr-1" /> Cancel (Esc)
           </Button>
         )}
-      </div>
 
-      <Separator />
+        <Separator />
 
-      <div className="flex-1 overflow-hidden flex flex-col gap-3">
+        {/* Gallery Section */}
         <div className="flex items-center justify-between px-1">
-          <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-            Current Stack ({screenshots.length})
-          </span>
-          <Button variant="outline" size="xs" className="h-7 text-xs gap-1">
+          <h2 className="text-[10px] font-bold uppercase text-muted-foreground tracking-widest">
+            Slide Stack ({screenshots.length})
+          </h2>
+          <Button
+            variant="outline"
+            size="xs"
+            className="h-7 text-xs gap-1 font-semibold border-primary/20 hover:border-primary/50"
+          >
             <FileUp className="w-3 h-3" /> Export PPT
           </Button>
         </div>
 
-        <ScrollArea className="flex-1 pr-3">
-          <div className="flex flex-col gap-4">
-            {screenshots.map((s) => (
+        <ScrollArea className="flex-1 -mr-2 pr-2">
+          <div className="flex flex-col gap-4 pb-12 mt-1">
+            {screenshots.map((s, i) => (
               <Card
                 key={s.id}
-                className="group relative border-none bg-secondary/30 overflow-hidden transition-all hover:ring-2 ring-primary/50"
+                className="group relative border-none bg-secondary/20 rounded-xl overflow-hidden shadow-sm hover:ring-2 ring-primary/40 transition-all"
               >
                 <CardContent className="p-0">
+                  <div className="absolute top-2 left-2 z-10">
+                    <span className="bg-black/70 text-white text-[9px] font-black px-2 py-0.5 rounded-md backdrop-blur-md border border-white/10">
+                      SLIDE {screenshots.length - i}
+                    </span>
+                  </div>
                   <img
                     src={URL.createObjectURL(s.blob)}
-                    className="w-full aspect-video object-cover"
+                    className="w-full aspect-video object-cover transition-transform group-hover:scale-[1.02]"
                   />
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                     <Button
                       variant="destructive"
                       size="icon"
+                      className="rounded-full h-9 w-9 shadow-2xl"
                       onClick={() =>
                         s.id &&
                         PPTRepository.deleteScreenshot(s.id).then(
@@ -231,10 +261,14 @@ function App() {
                 </CardContent>
               </Card>
             ))}
+
             {screenshots.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-20 border-2 border-dashed rounded-xl opacity-40">
-                <Camera className="w-8 h-8 mb-2" />
-                <p className="text-sm">Ready for your first capture</p>
+              <div className="py-20 text-center border-2 border-dashed rounded-2xl border-muted/20 opacity-40 flex flex-col items-center">
+                <Camera className="w-10 h-10 mb-2" />
+                <p className="text-sm italic">No captures yet</p>
+                <p className="text-[10px] mt-1 text-balance">
+                  Navigate to a website and press 'S' to begin.
+                </p>
               </div>
             )}
           </div>
