@@ -27,6 +27,7 @@ import { Screenshot, Presentation } from "@/assets/db";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
+import { Coffee } from "lucide-react";
 import pptxgen from "pptxgenjs";
 
 declare const browser: any;
@@ -403,6 +404,22 @@ function Index() {
             </div>
           )}
         </div>
+      </div>
+      <div className="flex items-center gap-2 w-full">
+        <Button
+          asChild
+          size="sm"
+          className="gap-2 h-8 text-[11px] font-bold bg-yellow-500 hover:bg-yellow-600 text-black shadow-sm"
+        >
+          <a
+            href="https://buymeacoffee.com/zalvendayao"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <Coffee className="w-4 h-4" />
+            Buy Me a Coffee
+          </a>
+        </Button>
       </div>
     </div>
   );

@@ -3,6 +3,10 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   manifest: {
+    name: "Slide Stream",
+    description:
+      "Capture and export presentation slides from videos instantly.",
+    version: "1.0.0",
     permissions: ["sidePanel", "activeTab", "storage", "tabs", "scripting"],
     host_permissions: ["<all_urls>"],
     action: {},
