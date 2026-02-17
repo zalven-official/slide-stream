@@ -21,6 +21,8 @@ import {
   FileArchive,
   ChevronDown,
   Presentation as PptIcon,
+  Loader2,
+  RefreshCcw,
 } from "lucide-react";
 import { PPTRepository } from "@/assets/repo";
 import { Screenshot, Presentation } from "@/assets/db";
@@ -294,6 +296,33 @@ function Index() {
     XLSX.writeFile(workbook, `${activePpt?.name || "slides"}-report.xlsx`);
   };
 
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const handleReset = useCallback(async () => {
+    if (!activePpt || screenshots.length === 0) return;
+
+    const confirmReset = window.confirm(
+      "Are you sure you want to delete all captures in this stack?",
+    );
+    if (!confirmReset) return;
+
+    setIsDeleting(true);
+    try {
+      // Assuming your repository has a method to clear by PPT ID
+      // If it doesn't, you can map over IDs and call deleteScreenshot
+      const deletePromises = screenshots.map(
+        (s) => s.id && PPTRepository.deleteScreenshot(s.id),
+      );
+      await Promise.all(deletePromises);
+
+      await loadScreenshots(activePpt.id);
+    } catch (error) {
+      console.error("Failed to reset:", error);
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [activePpt, screenshots, loadScreenshots]);
+
   return (
     <div className="flex flex-col h-screen w-full bg-background overflow-hidden font-sans">
       <div className="flex items-center justify-between px-4 py-3 border-b bg-card shrink-0">
@@ -349,6 +378,20 @@ function Index() {
         <p className="text-xs font-bold uppercase text-muted-foreground tracking-widest">
           Stack ({screenshots.length})
         </p>
+        <Button
+          variant="ghost"
+          size="xs"
+          onClick={handleReset}
+          disabled={screenshots.length === 0 || isDeleting}
+          className="h-7 text-[10px] font-bold text-destructive hover:bg-destructive/10"
+        >
+          {isDeleting ? (
+            <Loader2 className="w-3 h-3 animate-spin mr-1" />
+          ) : (
+            <RefreshCcw className="w-3 h-3 mr-1" />
+          )}
+          RESET
+        </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
