@@ -299,7 +299,11 @@ function Index() {
       <div className="flex items-center justify-between px-4 py-3 border-b bg-card shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground shadow-sm">
-            <LayoutDashboard className="w-4 h-4" />
+            <img
+              src="/icon/16.png"
+              alt="Dashboard Icon"
+              className="w-8 h-8 bg-white"
+            />
           </div>
           <h1 className="text-base font-bold tracking-tight">Slide Stream</h1>
         </div>
