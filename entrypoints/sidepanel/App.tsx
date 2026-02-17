@@ -49,6 +49,36 @@ function Index() {
     init();
   }, []);
 
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+
+    const init = async () => {
+      const ppts = await PPTRepository.getAllPresentations();
+      // Default to first project or create one
+      let current =
+        ppts[0] || (await PPTRepository.createPresentation("My Project"));
+      setActivePpt(current);
+
+      // Initial load
+      loadScreenshots(current.id);
+
+      // --- POLLING LOGIC ---
+      // Check for new screenshots every 500ms
+      interval = setInterval(() => {
+        if (current?.id) {
+          loadScreenshots(current.id);
+        }
+      }, 500);
+    };
+
+    init();
+
+    // Cleanup interval when popup closes
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, []);
+
   const loadScreenshots = async (id: string) => {
     const data = await PPTRepository.getScreenshotsByPPT(id);
     setScreenshots(data.sort((a, b) => b.timestamp - a.timestamp));
@@ -317,6 +347,9 @@ function Index() {
                 </div>
                 <img
                   src={URL.createObjectURL(s.blob)}
+                  onLoad={(e) =>
+                    URL.revokeObjectURL((e.target as HTMLImageElement).src)
+                  }
                   className="w-full aspect-video object-cover"
                 />
                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
