@@ -11,16 +11,21 @@ import {
   LayoutDashboard,
   X,
   Check,
+  Crosshair,
+  Image as ImageIcon,
 } from "lucide-react";
 import { PPTRepository } from "@/assets/repo";
 import { Screenshot, Presentation } from "@/assets/db";
 
-function App() {
+// Use the actual browser type provided by WXT
+declare const browser: any;
+
+function Index() {
   const [activePpt, setActivePpt] = useState<Presentation | null>(null);
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
   const [mode, setMode] = useState<"idle" | "adjusting">("idle");
 
-  // 1. Initial Load: Get or Create Project
+  // 1. Initial Load from real DB
   useEffect(() => {
     const init = async () => {
       const ppts = await PPTRepository.getAllPresentations();
@@ -36,11 +41,12 @@ function App() {
 
   const loadScreenshots = async (id: string) => {
     const data = await PPTRepository.getScreenshotsByPPT(id);
+    // Sort newest first
     setScreenshots(data.sort((a, b) => b.timestamp - a.timestamp));
   };
 
-  // 2. Capture Engine
   const triggerCapture = useCallback(async () => {
+    if (typeof browser === "undefined") return;
     const [tab] = await browser.tabs.query({
       active: true,
       currentWindow: true,
@@ -60,35 +66,30 @@ function App() {
   }, [mode, activePpt]);
 
   const captureAndSave = async (tabId: number) => {
+    if (typeof browser === "undefined") return;
     try {
-      // A. Get the box position
+      // Get rect
       const rect = await browser.tabs.sendMessage(tabId, { type: "GET_RECT" });
       if (!rect) throw new Error("Viewfinder not found");
 
-      // B. Save position for next time
-      await browser.storage.local.set({ viewfinderDim: rect });
-
-      // C. STEALTH MODE: Hide the blue box so it isn't in the screenshot
+      // Hide viewfinder for stealth capture
       await browser.tabs.sendMessage(tabId, { type: "HIDE_VIEWFINDER" });
+      await new Promise((r) => setTimeout(r, 100)); // Repaint delay
 
-      // D. Wait for browser repaint (essential to avoid capturing the blue box)
-      await new Promise((r) => setTimeout(r, 100));
-
-      // E. Take the clean screenshot
+      // Take screenshot
       const dataUrl = await browser.tabs.captureVisibleTab(
         browser.windows.WINDOW_ID_CURRENT,
-        {
-          format: "png",
-        },
+        { format: "png" },
       );
       if (!dataUrl) throw new Error("Capture failed");
 
-      // F. Crop the image
+      // Crop
       const croppedBlob = await cropImage(dataUrl, rect);
 
-      // G. Save to Database
+      // Save to real IDB
       if (activePpt && croppedBlob) {
         await PPTRepository.addScreenshot(activePpt.id, croppedBlob);
+        await browser.storage.local.set({ viewfinderDim: rect });
         await loadScreenshots(activePpt.id);
       }
 
@@ -99,34 +100,23 @@ function App() {
     }
   };
 
-  const cropImage = (src: string, rect: any): Promise<Blob> => {
+  const cropImage = (src: string, rect: any): Promise<Blob | null> => {
     return new Promise((res, rej) => {
       const img = new Image();
-      // Allow capturing images from other domains
       img.crossOrigin = "anonymous";
-
       img.onload = () => {
         const canvas = document.createElement("canvas");
         const dpr = window.devicePixelRatio || 1;
-
-        // Ensure we handle High DPI (Retina) screens correctly
         const sX = Math.max(0, rect.left * dpr);
         const sY = Math.max(0, rect.top * dpr);
         const sW = rect.width * dpr;
         const sH = rect.height * dpr;
-
         canvas.width = sW;
         canvas.height = sH;
-
         const ctx = canvas.getContext("2d");
         if (!ctx) return rej("Canvas context failed");
-
         ctx.drawImage(img, sX, sY, sW, sH, 0, 0, sW, sH);
-
-        canvas.toBlob((b) => {
-          if (b) res(b);
-          else rej("Blob generation failed");
-        }, "image/png");
+        canvas.toBlob((b) => res(b), "image/png");
       };
       img.onerror = () => rej("Image load error");
       img.src = src;
@@ -134,6 +124,7 @@ function App() {
   };
 
   const cancelCapture = async () => {
+    if (typeof browser === "undefined") return;
     const [tab] = await browser.tabs.query({
       active: true,
       currentWindow: true,
@@ -144,13 +135,11 @@ function App() {
     setMode("idle");
   };
 
-  // 3. Shortcuts: S to toggle/confirm, Escape to cancel
+  // Shortcut Listener
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      // Don't trigger if user is typing in an input
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
-
       if (e.key.toLowerCase() === "s") {
         e.preventDefault();
         triggerCapture();
@@ -164,90 +153,106 @@ function App() {
   }, [triggerCapture, mode]);
 
   return (
-    <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden">
+    <div className="flex flex-col h-screen w-full bg-background overflow-hidden">
       {/* Header */}
-      <header className="p-4 border-b flex items-center justify-between bg-card/50 backdrop-blur-sm">
-        <div className="flex items-center gap-2">
-          <div className="bg-primary p-1.5 rounded-lg shadow-lg">
-            <LayoutDashboard className="w-4 h-4 text-primary-foreground" />
+      <div className="flex items-center justify-between px-4 py-3 border-b bg-card shrink-0">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground shadow-sm">
+            <LayoutDashboard className="w-4 h-4" />
           </div>
-          <h1 className="font-bold text-sm tracking-tight">SnapStack</h1>
+          <h1 className="text-base font-bold text-foreground tracking-tight">
+            Slide Stream
+          </h1>
         </div>
-        <Badge variant="secondary" className="text-[10px] font-mono px-2 py-0">
-          {activePpt?.name}
+        <Badge
+          variant="secondary"
+          className="text-[10px] font-mono font-bold uppercase tracking-wider"
+        >
+          {activePpt?.name ?? "Project"}
         </Badge>
-      </header>
+      </div>
 
       {/* Main Controls */}
-      <div className="p-4 flex flex-col gap-4 flex-1 overflow-hidden">
-        <Button
-          onClick={triggerCapture}
-          className="w-full h-16 flex-col items-center justify-center gap-1 shadow-md hover:shadow-lg transition-all active:scale-[0.98]"
-          variant={mode === "adjusting" ? "default" : "secondary"}
-        >
-          <div className="flex items-center gap-2 font-bold">
+      <div className="px-4 pt-4 pb-3 space-y-3 shrink-0">
+        <div className="space-y-2">
+          <Button
+            onClick={triggerCapture}
+            className="w-full gap-2 h-12 shadow-sm font-bold"
+            variant={mode === "adjusting" ? "default" : "secondary"}
+          >
             {mode === "adjusting" ? (
               <Check className="w-5 h-5 animate-in zoom-in" />
             ) : (
-              <Camera className="w-5 h-5" />
+              <Crosshair className="w-5 h-5" />
             )}
-            {mode === "adjusting" ? "Confirm Selection" : "Open Viewfinder"}
-          </div>
-          <span className="text-[10px] font-normal opacity-60">
-            Press <kbd className="border bg-muted px-1 rounded mx-1">S</kbd> to{" "}
-            {mode === "adjusting" ? "capture" : "start"}
-          </span>
-        </Button>
+            {mode === "adjusting" ? "Confirm Snap" : "Capture Slide"}
+          </Button>
+
+          <p className="text-[10px] text-center text-muted-foreground uppercase font-bold tracking-widest opacity-60">
+            Press <kbd className="bg-muted px-1 rounded border">S</kbd> to{" "}
+            {mode === "adjusting" ? "save" : "start"}
+          </p>
+        </div>
 
         {mode === "adjusting" && (
           <Button
             variant="ghost"
             size="sm"
+            className="w-full gap-1.5 h-8 text-muted-foreground"
             onClick={cancelCapture}
-            className="h-6 text-xs text-muted-foreground hover:text-destructive transition-colors"
           >
-            <X className="w-3 h-3 mr-1" /> Cancel (Esc)
+            <X className="w-3.5 h-3.5" />
+            Cancel (Esc)
           </Button>
         )}
+      </div>
 
-        <Separator />
+      <Separator />
 
-        {/* Gallery Section */}
-        <div className="flex items-center justify-between px-1">
-          <h2 className="text-[10px] font-bold uppercase text-muted-foreground tracking-widest">
-            Slide Stack ({screenshots.length})
-          </h2>
-          <Button
-            variant="outline"
-            size="xs"
-            className="h-7 text-xs gap-1 font-semibold border-primary/20 hover:border-primary/50"
-          >
-            <FileUp className="w-3 h-3" /> Export PPT
-          </Button>
-        </div>
-
-        <ScrollArea className="flex-1 -mr-2 pr-2">
-          <div className="flex flex-col gap-4 pb-12 mt-1">
+      {/* Gallery Header */}
+      <div className="flex items-center justify-between px-4 py-2.5 shrink-0">
+        <p className="text-xs font-bold uppercase text-muted-foreground tracking-widest">
+          Slide Stack ({screenshots.length})
+        </p>
+        <Button
+          variant="outline"
+          size="xs"
+          className="gap-1.5 h-7 text-[10px] font-bold"
+        >
+          <FileUp className="w-3 h-3" />
+          EXPORT
+        </Button>
+      </div>
+      <div className="overflow-y-auto min-h-0 relative">
+        {/* Scrollable Gallery */}
+        <div className="flex-1 overflow-y-auto min-h-0 w-full custom-scrollbar">
+          <div className="px-4 pb-10 space-y-4 overflow-auto">
             {screenshots.map((s, i) => (
               <Card
-                key={s.id}
-                className="group relative border-none bg-secondary/20 rounded-xl overflow-hidden shadow-sm hover:ring-2 ring-primary/40 transition-all"
+                key={s.id ?? i}
+                className="overflow-hidden group border-none bg-secondary/20 hover:ring-2 ring-primary/40 transition-all"
               >
-                <CardContent className="p-0">
+                <CardContent className="p-0 relative">
                   <div className="absolute top-2 left-2 z-10">
-                    <span className="bg-black/70 text-white text-[9px] font-black px-2 py-0.5 rounded-md backdrop-blur-md border border-white/10">
+                    <Badge
+                      variant="secondary"
+                      className="text-[9px] font-black px-1.5 py-0.5 bg-black/60 text-white border-none backdrop-blur-md"
+                    >
                       SLIDE {screenshots.length - i}
-                    </span>
+                    </Badge>
                   </div>
+
                   <img
                     src={URL.createObjectURL(s.blob)}
-                    className="w-full aspect-video object-cover transition-transform group-hover:scale-[1.02]"
+                    alt="Screenshot"
+                    className="w-full aspect-video object-cover"
                   />
+
                   <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                     <Button
                       variant="destructive"
                       size="icon"
-                      className="rounded-full h-9 w-9 shadow-2xl"
+                      className="w-8 h-8 rounded-full shadow-xl"
                       onClick={() =>
                         s.id &&
                         PPTRepository.deleteScreenshot(s.id).then(
@@ -263,19 +268,20 @@ function App() {
             ))}
 
             {screenshots.length === 0 && (
-              <div className="py-20 text-center border-2 border-dashed rounded-2xl border-muted/20 opacity-40 flex flex-col items-center">
-                <Camera className="w-10 h-10 mb-2" />
-                <p className="text-sm italic">No captures yet</p>
-                <p className="text-[10px] mt-1 text-balance">
-                  Navigate to a website and press 'S' to begin.
+              <div className="flex flex-col items-center justify-center py-20 text-center space-y-3 opacity-40">
+                <div className="flex items-center justify-center w-12 h-12 rounded-full bg-muted">
+                  <ImageIcon className="w-6 h-6 text-muted-foreground" />
+                </div>
+                <p className="text-xs font-bold uppercase tracking-tighter">
+                  No captures yet
                 </p>
               </div>
             )}
           </div>
-        </ScrollArea>
+        </div>
       </div>
     </div>
   );
 }
 
-export default App;
+export default Index;
