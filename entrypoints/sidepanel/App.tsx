@@ -56,61 +56,89 @@ function App() {
       await captureAndSave(tab.id);
     }
   };
-
   const captureAndSave = async (tabId: number) => {
-    // 1. Get location from box
-    const rect = await browser.tabs.sendMessage(tabId, { type: "GET_RECT" });
-    if (!rect) return;
+    try {
+      // 1. Get location from box
+      const rect = await browser.tabs.sendMessage(tabId, { type: "GET_RECT" });
+      if (!rect) {
+        console.error("Could not find viewfinder rect");
+        return;
+      }
 
-    // 2. Save location for next time
-    await browser.storage.local.set({
-      viewfinderDim: {
-        width: rect.width,
-        height: rect.height,
-        top: rect.top,
-        left: rect.left,
-      },
-    });
+      // 2. Save location for next time
+      await browser.storage.local.set({
+        viewfinderDim: {
+          width: rect.width,
+          height: rect.height,
+          top: rect.top,
+          left: rect.left,
+        },
+      });
 
-    // 3. Take screenshot
-    const dataUrl = await browser.tabs.captureVisibleTab();
+      // 3. Take screenshot of the CURRENT window
+      // Explicitly passing null or the current window ID helps WXT/Chrome
+      const dataUrl = await browser.tabs.captureVisibleTab(undefined, {
+        format: "png",
+      });
 
-    // 4. Crop using Canvas
-    const croppedBlob = await cropImage(dataUrl, rect);
+      if (!dataUrl) {
+        console.error("Failed to capture tab");
+        return;
+      }
 
-    // 5. Save to DB
-    if (activePpt) {
-      await PPTRepository.addScreenshot(activePpt.id, croppedBlob);
-      await loadScreenshots(activePpt.id);
+      // 4. Crop using Canvas
+      const croppedBlob = await cropImage(dataUrl, rect);
+
+      // 5. Save to DB
+      if (activePpt && croppedBlob) {
+        await PPTRepository.addScreenshot(activePpt.id, croppedBlob);
+        await loadScreenshots(activePpt.id);
+      }
+
+      // 6. Cleanup
+      await browser.tabs.sendMessage(tabId, { type: "HIDE_VIEWFINDER" });
+      setMode("idle");
+    } catch (err) {
+      console.error("Capture failed:", err);
+      setMode("idle");
     }
-
-    // 6. Cleanup
-    await browser.tabs.sendMessage(tabId, { type: "HIDE_VIEWFINDER" });
-    setMode("idle");
   };
 
   const cropImage = (src: string, rect: any): Promise<Blob> => {
-    return new Promise((res) => {
+    return new Promise((res, rej) => {
       const img = new Image();
+      img.crossOrigin = "anonymous"; // Prevent tainted canvas
       img.onload = () => {
         const canvas = document.createElement("canvas");
+
+        // Calculate the scale between the actual image and the viewport
+        // This is crucial because a 1920x1080 screen capture is larger than the browser window
         const dpr = window.devicePixelRatio || 1;
-        canvas.width = rect.width;
-        canvas.height = rect.height;
-        const ctx = canvas.getContext("2d")!;
+
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return rej("Failed to get canvas context");
+
         ctx.drawImage(
           img,
-          rect.left * dpr,
-          rect.top * dpr,
-          rect.width * dpr,
-          rect.height * dpr,
-          0,
-          0,
-          rect.width,
-          rect.height,
+          rect.left * dpr, // Source X
+          rect.top * dpr, // Source Y
+          rect.width * dpr, // Source Width
+          rect.height * dpr, // Source Height
+          0, // Dest X
+          0, // Dest Y
+          rect.width * dpr, // Dest Width
+          rect.height * dpr, // Dest Height
         );
-        canvas.toBlob((b) => res(b!), "image/png");
+
+        canvas.toBlob((b) => {
+          if (b) res(b);
+          else rej("Blob generation failed");
+        }, "image/png");
       };
+      img.onerror = () => rej("Failed to load image");
       img.src = src;
     });
   };
