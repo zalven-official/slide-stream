@@ -1,10 +1,12 @@
 import { defineConfig } from "wxt";
-
-// See https://wxt.dev/api/config.html
+import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   manifest: {
     permissions: ["sidePanel"],
-    action: {}, // Required to create an action button
+    action: {},
   },
+  vite: () => ({
+    plugins: [tailwindcss()],
+  }),
   modules: ["@wxt-dev/module-react"],
 });
