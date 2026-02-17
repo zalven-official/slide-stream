@@ -10,7 +10,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  Camera,
   FileUp,
   Trash2,
   LayoutDashboard,
@@ -21,135 +20,69 @@ import {
   FileSpreadsheet,
   FileArchive,
   ChevronDown,
-  Presentation as PptIcon, // Added icon for PPT
+  Presentation as PptIcon,
 } from "lucide-react";
 import { PPTRepository } from "@/assets/repo";
 import { Screenshot, Presentation } from "@/assets/db";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
-import pptxgen from "pptxgenjs"; // Added PPT library
+import pptxgen from "pptxgenjs";
 
 declare const browser: any;
+
+// --- HELPER COMPONENT: Manages individual image URLs to stop flickering ---
+const SlideImage = ({ blob }: { blob: Blob }) => {
+  const [url, setUrl] = useState<string>("");
+
+  useEffect(() => {
+    const newUrl = URL.createObjectURL(blob);
+    setUrl(newUrl);
+    return () => URL.revokeObjectURL(newUrl);
+  }, [blob]);
+
+  if (!url)
+    return <div className="w-full aspect-video bg-secondary animate-pulse" />;
+
+  return (
+    <img
+      src={url}
+      className="w-full aspect-video object-cover"
+      alt="screenshot"
+    />
+  );
+};
 
 function Index() {
   const [activePpt, setActivePpt] = useState<Presentation | null>(null);
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
   const [mode, setMode] = useState<"idle" | "adjusting">("idle");
   const [isExporting, setIsExporting] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    const init = async () => {
-      const ppts = await PPTRepository.getAllPresentations();
-      let current =
-        ppts[0] || (await PPTRepository.createPresentation("My Project"));
-      setActivePpt(current);
-      loadScreenshots(current.id);
-    };
-    init();
-  }, []);
+  // --- STABLE LOAD FUNCTION: Prevents re-renders if data hasn't changed ---
+  const loadScreenshots = useCallback(
+    async (id: string, silent = false) => {
+      const data = await PPTRepository.getScreenshotsByPPT(id);
+      const sorted = data.sort((a, b) => b.timestamp - a.timestamp);
 
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-
-    const init = async () => {
-      const ppts = await PPTRepository.getAllPresentations();
-      // Default to first project or create one
-      let current =
-        ppts[0] || (await PPTRepository.createPresentation("My Project"));
-      setActivePpt(current);
-
-      // Initial load
-      loadScreenshots(current.id);
-
-      // --- POLLING LOGIC ---
-      // Check for new screenshots every 500ms
-      interval = setInterval(() => {
-        if (current?.id) {
-          loadScreenshots(current.id);
+      setScreenshots((prev) => {
+        // ANTI-FLICKER: Only update state if count or newest timestamp changed
+        if (
+          prev.length === sorted.length &&
+          prev[0]?.timestamp === sorted[0]?.timestamp
+        ) {
+          return prev;
         }
-      }, 500);
-    };
+        return sorted;
+      });
 
-    init();
+      if (isLoading) setIsLoading(false);
+    },
+    [isLoading],
+  );
 
-    // Cleanup interval when popup closes
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, []);
-
-  const loadScreenshots = async (id: string) => {
-    const data = await PPTRepository.getScreenshotsByPPT(id);
-    setScreenshots(data.sort((a, b) => b.timestamp - a.timestamp));
-  };
-  const exportAsPPT = async () => {
-    if (screenshots.length === 0) return;
-    setIsExporting(true);
-
-    try {
-      const pres = new pptxgen();
-
-      // We'll use the standard layout
-      pres.layout = "LAYOUT_16x9";
-
-      const chronological = [...screenshots].reverse();
-
-      for (const [index, s] of chronological.entries()) {
-        const slide = pres.addSlide();
-
-        const base64 = await new Promise<string>((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result as string);
-          reader.readAsDataURL(s.blob);
-        });
-
-        slide.addImage({
-          data: base64,
-          x: 0,
-          y: 0,
-          w: "100%",
-          h: "100%",
-        });
-      }
-      const blob = (await pres.write({ outputType: "blob" })) as Blob;
-      saveAs(blob, `${activePpt?.name || "SlideStream"}.pptx`);
-    } catch (error) {
-      console.error("PPT Export failed:", error);
-    } finally {
-      setIsExporting(false);
-    }
-  };
-  const exportAsImages = async () => {
-    if (screenshots.length === 0) return;
-    setIsExporting(true);
-    const zip = new JSZip();
-
-    screenshots.forEach((s, index) => {
-      const fileName = `slide-${screenshots.length - index}.png`;
-      zip.file(fileName, s.blob);
-    });
-
-    const content = await zip.generateAsync({ type: "blob" });
-    saveAs(content, `${activePpt?.name || "slides"}-images.zip`);
-    setIsExporting(false);
-  };
-
-  const exportAsExcel = () => {
-    if (screenshots.length === 0) return;
-    const data = screenshots.map((s, index) => ({
-      Slide: screenshots.length - index,
-      Timestamp: new Date(s.timestamp).toLocaleString(),
-      ID: s.id,
-    }));
-    const worksheet = XLSX.utils.json_to_sheet(data);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Slides");
-    XLSX.writeFile(workbook, `${activePpt?.name || "slides"}-report.xlsx`);
-  };
-
-  // --- CAPTURE LOGIC ---
-
+  // --- MANUAL CAPTURE LOGIC ---
   const triggerCapture = useCallback(async () => {
     if (typeof browser === "undefined") return;
     const [tab] = await browser.tabs.query({
@@ -168,66 +101,54 @@ function Index() {
     } else {
       await captureAndSave(tab.id);
     }
-  }, [mode, activePpt]);
+  }, [mode]);
 
   const captureAndSave = async (tabId: number) => {
     try {
       const rect = await browser.tabs.sendMessage(tabId, { type: "GET_RECT" });
       if (!rect) throw new Error("Viewfinder not found");
-
       await browser.tabs.sendMessage(tabId, { type: "HIDE_VIEWFINDER" });
-
-      // IMPORTANT: Google Slides/Canva need a longer delay (250ms+)
-      // to re-render the canvas properly after the viewfinder overlay is hidden.
       await new Promise((r) => setTimeout(r, 250));
 
-      const dataUrl = await browser.tabs.captureVisibleTab(
-        browser.windows.WINDOW_ID_CURRENT,
-        { format: "png" },
+      const dataUrl = await browser.tabs.captureVisibleTab(null, {
+        format: "png",
+      });
+      const img = new Image();
+      img.src = dataUrl;
+      await new Promise((r) => (img.onload = r));
+
+      const canvas = document.createElement("canvas");
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      const ctx = canvas.getContext("2d");
+      ctx?.drawImage(
+        img,
+        rect.left * dpr,
+        rect.top * dpr,
+        rect.width * dpr,
+        rect.height * dpr,
+        0,
+        0,
+        rect.width * dpr,
+        rect.height * dpr,
       );
 
-      const croppedBlob = await cropImage(dataUrl, rect);
+      canvas.toBlob(async (blob) => {
+        if (activePpt && blob) {
+          await PPTRepository.addScreenshot(activePpt.id, blob);
+          await browser.storage.local.set({ viewfinderDim: rect });
+          loadScreenshots(activePpt.id);
+        }
+      }, "image/png");
 
-      if (activePpt && croppedBlob) {
-        await PPTRepository.addScreenshot(activePpt.id, croppedBlob);
-        await browser.storage.local.set({ viewfinderDim: rect });
-        await loadScreenshots(activePpt.id);
-      }
       setMode("idle");
     } catch (err) {
-      console.error("Capture failed:", err);
       setMode("idle");
     }
   };
 
-  const cropImage = (src: string, rect: any): Promise<Blob | null> => {
-    return new Promise((res) => {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        const dpr = window.devicePixelRatio || 1;
-        canvas.width = rect.width * dpr;
-        canvas.height = rect.height * dpr;
-        const ctx = canvas.getContext("2d");
-        ctx?.drawImage(
-          img,
-          rect.left * dpr,
-          rect.top * dpr,
-          rect.width * dpr,
-          rect.height * dpr,
-          0,
-          0,
-          rect.width * dpr,
-          rect.height * dpr,
-        );
-        canvas.toBlob((b) => res(b), "image/png");
-      };
-      img.src = src;
-    });
-  };
-
-  const cancelCapture = async () => {
+  const cancelCapture = useCallback(async () => {
     const [tab] = await browser.tabs.query({
       active: true,
       currentWindow: true,
@@ -235,6 +156,89 @@ function Index() {
     if (tab?.id)
       await browser.tabs.sendMessage(tab.id, { type: "HIDE_VIEWFINDER" });
     setMode("idle");
+  }, []);
+
+  // --- SHORTCUT LISTENER (S for Capture, Esc for Cancel) ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      )
+        return;
+      if (e.key.toLowerCase() === "s") triggerCapture();
+      if (e.key === "Escape" && mode === "adjusting") cancelCapture();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [triggerCapture, cancelCapture, mode]);
+
+  // --- INITIALIZATION & POLLING ---
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    const init = async () => {
+      const ppts = await PPTRepository.getAllPresentations();
+      let current = ppts.find((p) => p.name === "YouTube Captures") || ppts[0];
+      if (!current)
+        current = await PPTRepository.createPresentation("YouTube Captures");
+      setActivePpt(current);
+      await loadScreenshots(current.id);
+      interval = setInterval(() => loadScreenshots(current.id, true), 1000);
+    };
+    init();
+    return () => clearInterval(interval);
+  }, [loadScreenshots]);
+
+  // --- EXPORT LOGIC ---
+  const exportAsPPT = async () => {
+    if (screenshots.length === 0) return;
+    setIsExporting(true);
+    try {
+      const pres = new pptxgen();
+      pres.layout = "LAYOUT_16x9";
+      const chronological = [...screenshots].reverse();
+      for (const s of chronological) {
+        const slide = pres.addSlide();
+        const base64 = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.readAsDataURL(s.blob);
+        });
+        slide.addImage({ data: base64, x: 0, y: 0, w: "100%", h: "100%" });
+      }
+      const blob = (await pres.write({ outputType: "blob" })) as Blob;
+      saveAs(blob, `${activePpt?.name || "SlideStream"}.pptx`);
+    } catch (error) {
+      console.error("PPT Export failed:", error);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const exportAsImages = async () => {
+    if (screenshots.length === 0) return;
+    setIsExporting(true);
+    const zip = new JSZip();
+    screenshots.forEach((s, index) => {
+      const fileName = `slide-${screenshots.length - index}.png`;
+      zip.file(fileName, s.blob);
+    });
+    const content = await zip.generateAsync({ type: "blob" });
+    saveAs(content, `${activePpt?.name || "slides"}-images.zip`);
+    setIsExporting(false);
+  };
+
+  const exportAsExcel = () => {
+    if (screenshots.length === 0) return;
+    const data = screenshots.map((s, index) => ({
+      Slide: screenshots.length - index,
+      Timestamp: new Date(s.timestamp).toLocaleString(),
+      ID: s.id,
+    }));
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Slides");
+    XLSX.writeFile(workbook, `${activePpt?.name || "slides"}-report.xlsx`);
   };
 
   return (
@@ -259,15 +263,20 @@ function Index() {
       <div className="px-4 pt-4 pb-3 space-y-3 shrink-0">
         <Button
           onClick={triggerCapture}
-          className="w-full gap-2 h-12 shadow-sm font-bold"
+          className="w-full gap-2 h-12 shadow-sm font-bold relative group"
           variant={mode === "adjusting" ? "default" : "secondary"}
         >
           {mode === "adjusting" ? (
-            <Check className="w-5 h-5 animate-in zoom-in" />
+            <Check className="w-5 h-5" />
           ) : (
             <Crosshair className="w-5 h-5" />
           )}
           {mode === "adjusting" ? "Confirm Snap" : "Capture Slide"}
+
+          {/* Keybind Hint */}
+          <span className="absolute right-3 px-1.5 py-0.5 rounded border border-current opacity-30 text-[10px] font-mono group-hover:opacity-100 transition-opacity">
+            S
+          </span>
         </Button>
         {mode === "adjusting" && (
           <Button
@@ -283,7 +292,7 @@ function Index() {
 
       <Separator />
 
-      {/* Gallery Header with Dropdown */}
+      {/* Gallery Header */}
       <div className="flex items-center justify-between px-4 py-2.5 shrink-0 bg-background/95 backdrop-blur-sm z-10">
         <p className="text-xs font-bold uppercase text-muted-foreground tracking-widest">
           Slide Stack ({screenshots.length})
@@ -333,7 +342,7 @@ function Index() {
         <div className="px-4 pb-10 space-y-4">
           {screenshots.map((s, i) => (
             <Card
-              key={s.id ?? i}
+              key={s.id || s.timestamp}
               className="overflow-hidden group border-none bg-secondary/20 hover:ring-2 ring-primary/40 transition-all shadow-sm"
             >
               <CardContent className="p-0 relative">
@@ -345,13 +354,9 @@ function Index() {
                     SLIDE {screenshots.length - i}
                   </Badge>
                 </div>
-                <img
-                  src={URL.createObjectURL(s.blob)}
-                  onLoad={(e) =>
-                    URL.revokeObjectURL((e.target as HTMLImageElement).src)
-                  }
-                  className="w-full aspect-video object-cover"
-                />
+
+                <SlideImage blob={s.blob} />
+
                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                   <Button
                     variant="destructive"
@@ -370,7 +375,8 @@ function Index() {
               </CardContent>
             </Card>
           ))}
-          {screenshots.length === 0 && (
+
+          {!isLoading && screenshots.length === 0 && (
             <div className="flex flex-col items-center justify-center py-24 text-center space-y-3 opacity-40">
               <ImageIcon className="w-8 h-8 text-muted-foreground" />
               <p className="text-xs font-bold uppercase tracking-tighter">
