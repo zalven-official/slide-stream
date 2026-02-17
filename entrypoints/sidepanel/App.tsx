@@ -378,20 +378,7 @@ function Index() {
         <p className="text-xs font-bold uppercase text-muted-foreground tracking-widest">
           Stack ({screenshots.length})
         </p>
-        <Button
-          variant="ghost"
-          size="xs"
-          onClick={handleReset}
-          disabled={screenshots.length === 0 || isDeleting}
-          className="h-7 text-[10px] font-bold text-destructive hover:bg-destructive/10"
-        >
-          {isDeleting ? (
-            <Loader2 className="w-3 h-3 animate-spin mr-1" />
-          ) : (
-            <RefreshCcw className="w-3 h-3 mr-1" />
-          )}
-          RESET
-        </Button>
+
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -466,6 +453,20 @@ function Index() {
             <Coffee className="w-4 h-4" />
             Buy Me a Coffee
           </a>
+        </Button>
+        <Button
+          variant="ghost"
+          size="xs"
+          onClick={handleReset}
+          disabled={screenshots.length === 0 || isDeleting}
+          className="h-7 text-[10px] font-bold text-destructive hover:bg-destructive/10"
+        >
+          {isDeleting ? (
+            <Loader2 className="w-3 h-3 animate-spin mr-1" />
+          ) : (
+            <RefreshCcw className="w-3 h-3 mr-1" />
+          )}
+          RESET
         </Button>
       </div>
     </div>
