@@ -21,12 +21,14 @@ import {
   FileSpreadsheet,
   FileArchive,
   ChevronDown,
+  Presentation as PptIcon, // Added icon for PPT
 } from "lucide-react";
 import { PPTRepository } from "@/assets/repo";
 import { Screenshot, Presentation } from "@/assets/db";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import * as XLSX from "xlsx";
+import pptxgen from "pptxgenjs"; // Added PPT library
 
 declare const browser: any;
 
@@ -51,9 +53,43 @@ function Index() {
     const data = await PPTRepository.getScreenshotsByPPT(id);
     setScreenshots(data.sort((a, b) => b.timestamp - a.timestamp));
   };
+  const exportAsPPT = async () => {
+    if (screenshots.length === 0) return;
+    setIsExporting(true);
 
-  // --- EXPORT LOGIC ---
+    try {
+      const pres = new pptxgen();
 
+      // We'll use the standard layout
+      pres.layout = "LAYOUT_16x9";
+
+      const chronological = [...screenshots].reverse();
+
+      for (const [index, s] of chronological.entries()) {
+        const slide = pres.addSlide();
+
+        const base64 = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.readAsDataURL(s.blob);
+        });
+
+        slide.addImage({
+          data: base64,
+          x: 0,
+          y: 0,
+          w: "100%",
+          h: "100%",
+        });
+      }
+      const blob = (await pres.write({ outputType: "blob" })) as Blob;
+      saveAs(blob, `${activePpt?.name || "SlideStream"}.pptx`);
+    } catch (error) {
+      console.error("PPT Export failed:", error);
+    } finally {
+      setIsExporting(false);
+    }
+  };
   const exportAsImages = async () => {
     if (screenshots.length === 0) return;
     setIsExporting(true);
@@ -71,20 +107,18 @@ function Index() {
 
   const exportAsExcel = () => {
     if (screenshots.length === 0) return;
-
     const data = screenshots.map((s, index) => ({
       Slide: screenshots.length - index,
       Timestamp: new Date(s.timestamp).toLocaleString(),
       ID: s.id,
     }));
-
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, "Slides");
     XLSX.writeFile(workbook, `${activePpt?.name || "slides"}-report.xlsx`);
   };
 
-  // --- CAPTURE LOGIC (Same as before) ---
+  // --- CAPTURE LOGIC ---
 
   const triggerCapture = useCallback(async () => {
     if (typeof browser === "undefined") return;
@@ -110,13 +144,18 @@ function Index() {
     try {
       const rect = await browser.tabs.sendMessage(tabId, { type: "GET_RECT" });
       if (!rect) throw new Error("Viewfinder not found");
+
       await browser.tabs.sendMessage(tabId, { type: "HIDE_VIEWFINDER" });
-      await new Promise((r) => setTimeout(r, 100));
+
+      // IMPORTANT: Google Slides/Canva need a longer delay (250ms+)
+      // to re-render the canvas properly after the viewfinder overlay is hidden.
+      await new Promise((r) => setTimeout(r, 250));
 
       const dataUrl = await browser.tabs.captureVisibleTab(
         browser.windows.WINDOW_ID_CURRENT,
         { format: "png" },
       );
+
       const croppedBlob = await cropImage(dataUrl, rect);
 
       if (activePpt && croppedBlob) {
@@ -126,12 +165,13 @@ function Index() {
       }
       setMode("idle");
     } catch (err) {
+      console.error("Capture failed:", err);
       setMode("idle");
     }
   };
 
   const cropImage = (src: string, rect: any): Promise<Blob | null> => {
-    return new Promise((res, rej) => {
+    return new Promise((res) => {
       const img = new Image();
       img.crossOrigin = "anonymous";
       img.onload = () => {
@@ -168,7 +208,7 @@ function Index() {
   };
 
   return (
-    <div className="flex flex-col h-screen w-full bg-background overflow-hidden">
+    <div className="flex flex-col h-screen w-full bg-background overflow-hidden font-sans">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b bg-card shrink-0">
         <div className="flex items-center gap-2.5">
@@ -193,7 +233,7 @@ function Index() {
           variant={mode === "adjusting" ? "default" : "secondary"}
         >
           {mode === "adjusting" ? (
-            <Check className="w-5 h-5" />
+            <Check className="w-5 h-5 animate-in zoom-in" />
           ) : (
             <Crosshair className="w-5 h-5" />
           )}
@@ -232,20 +272,27 @@ function Index() {
               <ChevronDown className="w-3 h-3 opacity-50" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40">
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuItem
+              onClick={exportAsPPT}
+              className="gap-2 cursor-pointer"
+            >
+              <PptIcon className="w-4 h-4 text-red-500" />
+              <span className="font-medium">PowerPoint (.pptx)</span>
+            </DropdownMenuItem>
             <DropdownMenuItem
               onClick={exportAsImages}
               className="gap-2 cursor-pointer"
             >
               <FileArchive className="w-4 h-4 text-orange-500" />
-              <span>Images (ZIP)</span>
+              <span className="font-medium">Images (ZIP)</span>
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={exportAsExcel}
               className="gap-2 cursor-pointer"
             >
               <FileSpreadsheet className="w-4 h-4 text-green-600" />
-              <span>Report (Excel)</span>
+              <span className="font-medium">Report (Excel)</span>
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
