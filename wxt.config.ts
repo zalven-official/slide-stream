@@ -6,6 +6,9 @@ export default defineConfig({
     permissions: ["sidePanel", "activeTab", "storage", "tabs", "scripting"],
     host_permissions: ["<all_urls>"],
     action: {},
+    side_panel: {
+      default_path: "index.html",
+    },
   },
   vite: () => ({
     plugins: [tailwindcss()],

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, memo } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -31,8 +31,9 @@ import pptxgen from "pptxgenjs";
 
 declare const browser: any;
 
-// --- HELPER COMPONENT: Manages individual image URLs to stop flickering ---
-const SlideImage = ({ blob }: { blob: Blob }) => {
+// --- 1. MEMOIZED IMAGE COMPONENT ---
+// This prevents the "blink" by ensuring the Blob URL is only created ONCE per blob.
+const SlideImage = memo(({ blob }: { blob: Blob }) => {
   const [url, setUrl] = useState<string>("");
 
   useEffect(() => {
@@ -51,7 +52,51 @@ const SlideImage = ({ blob }: { blob: Blob }) => {
       alt="screenshot"
     />
   );
-};
+});
+
+// --- 2. MEMOIZED CARD COMPONENT ---
+// This prevents the entire Card from re-rendering unless its specific data changes.
+const ScreenshotCard = memo(
+  ({
+    s,
+    index,
+    total,
+    onDelete,
+  }: {
+    s: Screenshot;
+    index: number;
+    total: number;
+    onDelete: (id: number) => void;
+  }) => {
+    return (
+      <Card className="overflow-hidden group border-none bg-secondary/20 hover:ring-2 ring-primary/40 transition-all shadow-sm">
+        <CardContent className="p-0 relative">
+          <div className="absolute top-2 left-2 z-10">
+            <Badge
+              variant="secondary"
+              className="text-[9px] font-black px-1.5 py-0.5 bg-black/60 text-white border-none backdrop-blur-md"
+            >
+              SLIDE {total - index}
+            </Badge>
+          </div>
+
+          <SlideImage blob={s.blob} />
+
+          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+            <Button
+              variant="destructive"
+              size="icon"
+              className="w-8 h-8 rounded-full shadow-xl"
+              onClick={() => s.id && onDelete(s.id)}
+            >
+              <Trash2 className="w-4 h-4" />
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  },
+);
 
 function Index() {
   const [activePpt, setActivePpt] = useState<Presentation | null>(null);
@@ -60,16 +105,17 @@ function Index() {
   const [isExporting, setIsExporting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  // --- STABLE LOAD FUNCTION: Prevents re-renders if data hasn't changed ---
+  // --- STABLE LOAD FUNCTION ---
   const loadScreenshots = useCallback(
     async (id: string, silent = false) => {
       const data = await PPTRepository.getScreenshotsByPPT(id);
       const sorted = data.sort((a, b) => b.timestamp - a.timestamp);
 
       setScreenshots((prev) => {
-        // ANTI-FLICKER: Only update state if count or newest timestamp changed
+        // ANTI-FLICKER: Deep comparison of ID and Timestamp
         if (
           prev.length === sorted.length &&
+          prev[0]?.id === sorted[0]?.id &&
           prev[0]?.timestamp === sorted[0]?.timestamp
         ) {
           return prev;
@@ -80,6 +126,15 @@ function Index() {
       if (isLoading) setIsLoading(false);
     },
     [isLoading],
+  );
+
+  // --- DELETE HANDLER ---
+  const handleDelete = useCallback(
+    async (id: number) => {
+      await PPTRepository.deleteScreenshot(id);
+      if (activePpt) loadScreenshots(activePpt.id);
+    },
+    [activePpt, loadScreenshots],
   );
 
   // --- MANUAL CAPTURE LOGIC ---
@@ -141,7 +196,6 @@ function Index() {
           loadScreenshots(activePpt.id);
         }
       }, "image/png");
-
       setMode("idle");
     } catch (err) {
       setMode("idle");
@@ -158,7 +212,7 @@ function Index() {
     setMode("idle");
   }, []);
 
-  // --- SHORTCUT LISTENER (S for Capture, Esc for Cancel) ---
+  // --- KEYBOARD LISTENERS ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
@@ -209,7 +263,7 @@ function Index() {
       const blob = (await pres.write({ outputType: "blob" })) as Blob;
       saveAs(blob, `${activePpt?.name || "SlideStream"}.pptx`);
     } catch (error) {
-      console.error("PPT Export failed:", error);
+      console.error(error);
     } finally {
       setIsExporting(false);
     }
@@ -220,8 +274,7 @@ function Index() {
     setIsExporting(true);
     const zip = new JSZip();
     screenshots.forEach((s, index) => {
-      const fileName = `slide-${screenshots.length - index}.png`;
-      zip.file(fileName, s.blob);
+      zip.file(`slide-${screenshots.length - index}.png`, s.blob);
     });
     const content = await zip.generateAsync({ type: "blob" });
     saveAs(content, `${activePpt?.name || "slides"}-images.zip`);
@@ -233,7 +286,6 @@ function Index() {
     const data = screenshots.map((s, index) => ({
       Slide: screenshots.length - index,
       Timestamp: new Date(s.timestamp).toLocaleString(),
-      ID: s.id,
     }));
     const worksheet = XLSX.utils.json_to_sheet(data);
     const workbook = XLSX.utils.book_new();
@@ -243,7 +295,6 @@ function Index() {
 
   return (
     <div className="flex flex-col h-screen w-full bg-background overflow-hidden font-sans">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b bg-card shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-foreground shadow-sm">
@@ -253,13 +304,12 @@ function Index() {
         </div>
         <Badge
           variant="secondary"
-          className="text-[10px] font-mono font-bold uppercase tracking-wider"
+          className="text-[10px] font-mono font-bold uppercase"
         >
           {activePpt?.name ?? "Project"}
         </Badge>
       </div>
 
-      {/* Main Controls */}
       <div className="px-4 pt-4 pb-3 space-y-3 shrink-0">
         <Button
           onClick={triggerCapture}
@@ -272,8 +322,6 @@ function Index() {
             <Crosshair className="w-5 h-5" />
           )}
           {mode === "adjusting" ? "Confirm Snap" : "Capture Slide"}
-
-          {/* Keybind Hint */}
           <span className="absolute right-3 px-1.5 py-0.5 rounded border border-current opacity-30 text-[10px] font-mono group-hover:opacity-100 transition-opacity">
             S
           </span>
@@ -292,12 +340,10 @@ function Index() {
 
       <Separator />
 
-      {/* Gallery Header */}
       <div className="flex items-center justify-between px-4 py-2.5 shrink-0 bg-background/95 backdrop-blur-sm z-10">
         <p className="text-xs font-bold uppercase text-muted-foreground tracking-widest">
-          Slide Stack ({screenshots.length})
+          Stack ({screenshots.length})
         </p>
-
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -306,8 +352,7 @@ function Index() {
               className="gap-1.5 h-7 text-[10px] font-bold border-primary/20"
               disabled={screenshots.length === 0 || isExporting}
             >
-              <FileUp className="w-3 h-3" />
-              {isExporting ? "EXPORTING..." : "EXPORT"}
+              <FileUp className="w-3 h-3" /> {isExporting ? "..." : "EXPORT"}{" "}
               <ChevronDown className="w-3 h-3 opacity-50" />
             </Button>
           </DropdownMenuTrigger>
@@ -317,63 +362,36 @@ function Index() {
               className="gap-2 cursor-pointer"
             >
               <PptIcon className="w-4 h-4 text-red-500" />
-              <span className="font-medium">PowerPoint (.pptx)</span>
+              PowerPoint
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={exportAsImages}
               className="gap-2 cursor-pointer"
             >
               <FileArchive className="w-4 h-4 text-orange-500" />
-              <span className="font-medium">Images (ZIP)</span>
+              Images (ZIP)
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={exportAsExcel}
               className="gap-2 cursor-pointer"
             >
               <FileSpreadsheet className="w-4 h-4 text-green-600" />
-              <span className="font-medium">Report (Excel)</span>
+              Excel Report
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
 
-      {/* Scrollable Gallery */}
       <div className="flex-1 overflow-y-auto min-h-0 w-full custom-scrollbar">
         <div className="px-4 pb-10 space-y-4">
           {screenshots.map((s, i) => (
-            <Card
+            <ScreenshotCard
               key={s.id || s.timestamp}
-              className="overflow-hidden group border-none bg-secondary/20 hover:ring-2 ring-primary/40 transition-all shadow-sm"
-            >
-              <CardContent className="p-0 relative">
-                <div className="absolute top-2 left-2 z-10">
-                  <Badge
-                    variant="secondary"
-                    className="text-[9px] font-black px-1.5 py-0.5 bg-black/60 text-white border-none backdrop-blur-md"
-                  >
-                    SLIDE {screenshots.length - i}
-                  </Badge>
-                </div>
-
-                <SlideImage blob={s.blob} />
-
-                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                  <Button
-                    variant="destructive"
-                    size="icon"
-                    className="w-8 h-8 rounded-full shadow-xl"
-                    onClick={() =>
-                      s.id &&
-                      PPTRepository.deleteScreenshot(s.id).then(
-                        () => activePpt && loadScreenshots(activePpt.id),
-                      )
-                    }
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
+              s={s}
+              index={i}
+              total={screenshots.length}
+              onDelete={handleDelete}
+            />
           ))}
 
           {!isLoading && screenshots.length === 0 && (
